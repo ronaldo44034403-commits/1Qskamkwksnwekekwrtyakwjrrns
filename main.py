@@ -2,8 +2,8 @@
 Мессенджер-сервер на Python (FastAPI + SQLite + WebSocket).
 
 Установка:   pip install fastapi uvicorn
-Запуск:      uvicorn server:app --host 0.0.0.0 --port 8000
-Render:      Start command = uvicorn server:app --host 0.0.0.0 --port $PORT
+Запуск:      uvicorn main:app --host 0.0.0.0 --port 8000   (или просто: python main.py)
+Render:      Start command = uvicorn main:app --host 0.0.0.0 --port $PORT
 
 Переменные окружения (необязательно):
   ADMIN_PHONE  номер админ-аккаунта (по умолчанию +000)
@@ -47,8 +47,10 @@ app = FastAPI(title="MyMessenger server")
 
 # ---------- База ----------
 def _db():
-    c = sqlite3.connect(DB_PATH)
+    c = sqlite3.connect(DB_PATH, timeout=10)
     c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA busy_timeout=10000")
     return c
 
 
@@ -90,6 +92,10 @@ def init_db():
 
 
 init_db()
+
+if ADMIN_PHONE == "+000" or LOGIN_CODE == "1234":
+    print("ВНИМАНИЕ: стоят ADMIN_PHONE/LOGIN_CODE по умолчанию. "
+          "Любой, кто знает +000 и 1234, станет админом. Задай свои в переменных окружения.")
 
 
 def pub(u):
@@ -530,9 +536,13 @@ async def ws_endpoint(ws: WebSocket, token: str = ""):
             data = await ws.receive_json()
             u = one("SELECT * FROM users WHERE id=?", (uid,))
             if not u or u["banned"]:
+                await ws.close(code=4403)
                 break
+            if not isinstance(data, dict):
+                await ws.send_json({"type": "error", "detail": "bad payload"})
+                continue
             try:
-                await handle_send(u, data.get("chat_id", "global"), data.get("text", ""))
+                await handle_send(u, str(data.get("chat_id", "global")), str(data.get("text", "")))
             except HTTPException as e:
                 await ws.send_json({"type": "error", "detail": e.detail})
     except WebSocketDisconnect:
