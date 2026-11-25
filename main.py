@@ -35,6 +35,7 @@ from contextlib import closing
 from typing import Dict, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 DB_PATH = os.environ.get("DB_PATH", "server.db")
@@ -290,9 +291,176 @@ class SendIn(BaseModel):
     text: str
 
 
-@app.get("/")
-def root():
+PAGE = r"""<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MyMessenger</title>
+<style>
+:root{--bg:#0e1621;--panel:#17212b;--line:#0b121a;--txt:#e8eef5;--mut:#7f91a4;--acc:#2b95e6;--me:#2b5278}
+*{box-sizing:border-box}[hidden]{display:none!important}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,sans-serif;font-size:16px}
+#app{display:flex;flex-direction:column;height:100dvh;max-width:720px;margin:auto}
+input,select,button{font:inherit;color:var(--txt);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px}
+button{background:var(--acc);border:0;cursor:pointer}button.g{background:var(--panel);border:1px solid #2a3947}
+button.r{background:#b3402f}
+#login{margin:auto;width:92%;max-width:360px;display:flex;flex-direction:column;gap:10px}
+#login h2{text-align:center;margin:0 0 6px}#err{color:#ff7b6b;min-height:1.2em;text-align:center}
+#main{display:flex;flex-direction:column;flex:1;min-height:0}
+header{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:var(--panel)}
+header span{color:var(--mut);font-size:14px}
+nav{display:flex;background:var(--panel);border-bottom:1px solid var(--line)}
+nav button{flex:1;background:none;border-radius:0;color:var(--mut);border-bottom:2px solid transparent}
+nav button.on{color:var(--acc);border-bottom-color:var(--acc)}
+.pane{flex:1;min-height:0;display:flex;flex-direction:column}
+#chatTitle{padding:8px 14px;color:var(--mut);font-size:14px}
+#msgs{flex:1;overflow-y:auto;padding:8px 12px;display:flex;flex-direction:column;gap:6px}
+.m{background:var(--panel);padding:8px 11px;border-radius:12px;max-width:82%;align-self:flex-start;word-break:break-word}
+.m.me{background:var(--me);align-self:flex-end}.n{font-size:12px;color:var(--acc);margin-bottom:2px}
+.ts{font-size:11px;color:var(--mut);text-align:right;margin-top:2px}
+.s{align-self:center;background:#243447;color:#cfe3f7;padding:8px 12px;border-radius:12px;white-space:pre-wrap;font-size:14px}
+#bar{display:flex;gap:8px;padding:8px;background:var(--panel)}#inp{flex:1}
+.list{overflow-y:auto;padding:8px}.u{padding:13px;border-bottom:1px solid var(--line)}
+#admin{padding:12px;overflow-y:auto;gap:10px}
+.row{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+#alog{white-space:pre-wrap;background:var(--panel);border-radius:10px;padding:10px;font-size:14px;min-height:80px;margin-top:8px}
+#toast{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#243447;padding:10px 16px;border-radius:12px;max-width:90%}
+</style></head><body><div id="app">
+<div id="login" hidden>
+<h2>MyMessenger</h2>
+<input id="phone" placeholder="Номер (любой, например +000)" inputmode="tel">
+<input id="name" placeholder="Имя (для нового аккаунта)">
+<input id="code" placeholder="Код (1234)" inputmode="numeric">
+<button id="goLogin">Войти</button><div id="err"></div></div>
+<div id="main" hidden>
+<header><b id="who"></b><button class="g" id="out">Выйти</button></header>
+<nav><button data-t="chat" class="on">Чат</button><button data-t="people">Люди</button><button data-t="admin" id="adminTab" hidden>Админ</button></nav>
+<div class="pane" id="p-chat"><div id="chatTitle"></div><div id="msgs"></div>
+<div id="bar"><input id="inp" placeholder="Сообщение..." autocomplete="off"><button id="send">➤</button></div></div>
+<div class="pane list" id="p-people" hidden><div id="ulist"></div></div>
+<div class="pane" id="admin" hidden>
+<select id="sel"></select>
+<div class="row"><button class="r" data-c="бан">Бан</button><button class="g" data-c="разбан">Разбан</button><button class="g" data-c="кик">Кик</button></div>
+<div class="row"><button data-c="премиум" data-x="вкл">Премиум вкл</button><button class="g" data-c="премиум" data-x="выкл">Премиум выкл</button></div>
+<div class="row"><button data-c="админ" data-x="вкл">Админ вкл</button><button class="g" data-c="админ" data-x="выкл">Админ выкл</button></div>
+<div class="row"><input id="stars" type="number" value="100" style="width:110px"><button id="giveStars">Выдать ★</button></div>
+<div class="row"><input id="raw" placeholder=".команда" style="flex:1"><button id="runRaw">OK</button></div>
+<div class="row"><button class="g" id="hUsers">.юзеры</button><button class="g" id="hHelp">.помощь</button></div>
+<div id="alog"></div></div>
+</div></div><div id="toast" hidden></div>
+<script>
+const $=s=>document.querySelector(s);
+let token=localStorage.getItem('token'),me=null,chat='global',ws=null,users=[],kicked=false,opened=false,seen=new Set();
+async function api(path,body){
+  const o={headers:{'Content-Type':'application/json'}};
+  if(token)o.headers.Authorization='Bearer '+token;
+  if(body){o.method='POST';o.body=JSON.stringify(body)}
+  const r=await fetch(path,o);let d=null;try{d=await r.json()}catch(e){}
+  if(!r.ok)throw new Error(d&&typeof d.detail==='string'?d.detail:'HTTP '+r.status);
+  return d;
+}
+function toast(t){const e=$('#toast');e.textContent=t;e.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(()=>e.hidden=true,3500)}
+async function doLogin(){
+  $('#err').textContent='';
+  try{
+    token=null;
+    const d=await api('/auth/login',{phone:$('#phone').value.trim(),code:$('#code').value.trim(),name:$('#name').value.trim()});
+    token=d.token;localStorage.setItem('token',token);await boot();
+  }catch(e){$('#err').textContent=e.message}
+}
+function logout(){
+  token=null;me=null;kicked=false;opened=false;localStorage.removeItem('token');
+  if(ws){try{ws.close()}catch(e){}ws=null}
+  $('#main').hidden=true;$('#login').hidden=false;
+}
+function showMe(){$('#who').textContent=me.name+(me.is_admin?' 👑':'')+(me.premium?' ⭐':'')+'  ★'+me.stars}
+async function boot(){
+  try{me=await api('/me')}catch(e){logout();return}
+  $('#login').hidden=true;$('#main').hidden=false;
+  $('#adminTab').hidden=!me.is_admin;showMe();
+  await refreshUsers();await openChat('global','Общий чат');connect();
+}
+function tab(n){
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.t===n));
+  $('#p-chat').hidden=n!=='chat';$('#p-people').hidden=n!=='people';$('#admin').hidden=n!=='admin';
+  if(n==='people'||n==='admin')refreshUsers().catch(()=>{});
+}
+function addMsg(m){
+  if(seen.has(m.id))return;seen.add(m.id);
+  const b=$('#msgs'),d=document.createElement('div');d.className='m'+(m.sender.id===me.id?' me':'');
+  const n=document.createElement('div');n.className='n';
+  n.textContent=m.sender.name+(m.sender.is_admin?' 👑':'')+(m.sender.premium?' ⭐':'');
+  const t=document.createElement('div');t.textContent=m.text;
+  const ts=document.createElement('div');ts.className='ts';
+  ts.textContent=new Date(m.ts*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  d.append(n,t,ts);b.append(d);b.scrollTop=b.scrollHeight;
+}
+function addSys(txt){const b=$('#msgs'),d=document.createElement('div');d.className='s';d.textContent=txt;b.append(d);b.scrollTop=b.scrollHeight}
+async function loadMsgs(){
+  const box=$('#msgs');box.textContent='';seen=new Set();
+  try{(await api('/messages/'+chat+'?limit=100')).forEach(addMsg)}catch(e){addSys(e.message)}
+}
+async function openChat(id,title){chat=id;$('#chatTitle').textContent=title;await loadMsgs();tab('chat')}
+async function send(){
+  const i=$('#inp'),text=i.value.trim();if(!text)return;i.value='';
+  try{const r=await api('/send',{chat_id:chat,text});if(r.type==='system')addSys(r.text);else addMsg(r)}
+  catch(e){addSys(e.message)}
+}
+async function refreshUsers(){
+  users=await api('/users');
+  const l=$('#ulist');l.textContent='';
+  const g=document.createElement('div');g.className='u';g.textContent='💬 Общий чат';g.onclick=()=>openChat('global','Общий чат');l.append(g);
+  users.filter(u=>u.id!==me.id).forEach(u=>{
+    const d=document.createElement('div');d.className='u';
+    d.textContent=u.name+'  '+u.phone+(u.is_admin?' 👑':'')+(u.premium?' ⭐':'')+(u.banned?' 🚫':'')+'  ★'+u.stars;
+    d.onclick=()=>{const a=Math.min(me.id,u.id),b=Math.max(me.id,u.id);openChat('dm:'+a+':'+b,u.name)};
+    l.append(d);
+  });
+  const s=$('#sel'),old=s.value;s.textContent='';
+  users.forEach(u=>{const o=document.createElement('option');o.value=u.id;o.textContent='#'+u.id+' '+u.name+' '+u.phone;s.append(o)});
+  if(old)s.value=old;
+}
+async function runAdmin(text){
+  try{
+    const r=await api('/send',{chat_id:'global',text});
+    $('#alog').textContent=text+'\n'+r.text+'\n\n'+$('#alog').textContent;
+    me=await api('/me');showMe();await refreshUsers();
+  }catch(e){$('#alog').textContent='Ошибка: '+e.message+'\n\n'+$('#alog').textContent}
+}
+function cmd(c,x){const id=$('#sel').value;if(!id)return;runAdmin('.'+c+' '+id+(x?' '+x:''))}
+function connect(){
+  if(ws){try{ws.close()}catch(e){}}
+  const p=location.protocol==='https:'?'wss:':'ws:';
+  ws=new WebSocket(p+'//'+location.host+'/ws?token='+token);
+  ws.onopen=()=>{if(opened)loadMsgs();opened=true};
+  ws.onmessage=e=>{
+    const m=JSON.parse(e.data);
+    if(m.type==='message'){if(m.chat_id===chat)addMsg(m);else toast(m.sender.name+': '+m.text)}
+    else if(m.type==='kicked'){kicked=true;toast('Вас отключили: '+m.reason);if(m.reason==='banned')logout()}
+    else if(m.type==='error')addSys(m.detail);
+  };
+  ws.onclose=()=>{if(token&&!kicked)setTimeout(connect,3000)};
+}
+$('#goLogin').onclick=doLogin;
+['phone','name','code'].forEach(i=>$('#'+i).addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()}));
+$('#out').onclick=logout;$('#send').onclick=send;
+$('#inp').addEventListener('keydown',e=>{if(e.key==='Enter')send()});
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>tab(b.dataset.t));
+document.querySelectorAll('#admin [data-c]').forEach(b=>b.onclick=()=>cmd(b.dataset.c,b.dataset.x));
+$('#giveStars').onclick=()=>cmd('звезды',$('#stars').value);
+$('#runRaw').onclick=()=>{const t=$('#raw').value.trim();if(t)runAdmin(t)};
+$('#hUsers').onclick=()=>runAdmin('.юзеры');$('#hHelp').onclick=()=>runAdmin('.помощь');
+if(token)boot();else $('#login').hidden=false;
+</script></body></html>
+"""
+
+
+@app.get("/health")
+def health():
     return {"ok": True, "service": "MyMessenger"}
+
+
+@app.get("/", response_class=HTMLResponse)
+def root():
+    return PAGE
 
 
 @app.post("/auth/login")
